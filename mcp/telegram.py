@@ -108,25 +108,6 @@ async def telegram_api_call(
         return response.json()
 
 
-def _resolve_account(config: TelegramConfig) -> tuple[str | None, dict | None]:
-    """Resolve account from URL path to token. Returns (token, error_dict)."""
-    account = account_override.get()
-    if account is None:
-        return None, {"error": "No account specified in URL path."}
-    token = config.get_token(account)
-    if not token:
-        return None, {"error": f"Unknown account: {account}."}
-    return token, None
-
-
-def _resolve_level(config: TelegramConfig) -> str:
-    """Get the configured level for the current account."""
-    account = account_override.get()
-    if account is None:
-        return "basic"
-    return config.get_level(account)
-
-
 def _update_user_id(update: dict) -> int | None:
     """Extract the user ID from a Telegram update object."""
     for key in ("message", "edited_message", "channel_post", "edited_channel_post",
@@ -137,18 +118,31 @@ def _update_user_id(update: dict) -> int | None:
     return None
 
 
-def _check_chat_allowed(config: TelegramConfig, *chat_ids: str) -> dict | None:
-    """Check if chat IDs are in the account's allowed list. Returns error or None."""
+async def _call(config: TelegramConfig, method: str, params: dict | None = None,
+                *, min_level: str = "basic", check_chats: tuple[str, ...] = ()) -> dict:
+    """Resolve account, enforce level/chat restrictions, and call the Telegram API."""
     account = account_override.get()
     if account is None:
-        return None
-    allowed = config.get_allowed_chats(account)
-    if allowed is None:
-        return None
-    for chat_id in chat_ids:
-        if str(chat_id) not in allowed:
-            return {"error": f"Chat {chat_id} is not in the allowed list for this account."}
-    return None
+        return {"error": "No account specified in URL path."}
+    token = config.get_token(account)
+    if not token:
+        return {"error": f"Unknown account: {account}."}
+    if min_level != "basic":
+        level = config.get_level(account)
+        if not _level_at_least(min_level, level):
+            return {"error": f"This tool requires '{min_level}' level or higher."}
+    if check_chats:
+        allowed = config.get_allowed_chats(account)
+        if allowed is not None:
+            for cid in check_chats:
+                if str(cid) not in allowed:
+                    return {"error": f"Chat {cid} is not in the allowed list for this account."}
+    try:
+        return await telegram_api_call(token, method, params)
+    except httpx.HTTPStatusError as e:
+        return {"error": f"Telegram API error: {e.response.status_code}"}
+    except httpx.RequestError as e:
+        return {"error": f"Request failed: {str(e)}"}
 
 
 def register_telegram_tools(mcp, config: TelegramConfig):
@@ -168,15 +162,7 @@ def register_telegram_tools(mcp, config: TelegramConfig):
     @mcp.tool()
     async def telegram_get_me() -> dict:
         """Get information about this Telegram bot account."""
-        token, err = _resolve_account(config)
-        if err:
-            return err
-        try:
-            return await telegram_api_call(token, "getMe")
-        except httpx.HTTPStatusError as e:
-            return {"error": f"Telegram API error: {e.response.status_code}"}
-        except httpx.RequestError as e:
-            return {"error": f"Request failed: {str(e)}"}
+        return await _call(config, "getMe")
 
     @mcp.tool()
     async def telegram_send_message(
@@ -191,21 +177,10 @@ def register_telegram_tools(mcp, config: TelegramConfig):
             text: Message text to send (max 4096 characters).
             parse_mode: Optional formatting: "HTML", "Markdown", or "MarkdownV2".
         """
-        token, err = _resolve_account(config)
-        if err:
-            return err
-        err = _check_chat_allowed(config, chat_id)
-        if err:
-            return err
         params = {"chat_id": chat_id, "text": text}
         if parse_mode:
             params["parse_mode"] = parse_mode
-        try:
-            return await telegram_api_call(token, "sendMessage", params)
-        except httpx.HTTPStatusError as e:
-            return {"error": f"Telegram API error: {e.response.status_code}"}
-        except httpx.RequestError as e:
-            return {"error": f"Request failed: {str(e)}"}
+        return await _call(config, "sendMessage", params, check_chats=(chat_id,))
 
     @mcp.tool()
     async def telegram_get_updates(
@@ -218,18 +193,12 @@ def register_telegram_tools(mcp, config: TelegramConfig):
             limit: Maximum number of updates to retrieve (1-100, default 10).
             offset: Update ID offset. Pass the highest update_id + 1 from previous results to acknowledge older updates.
         """
-        token, err = _resolve_account(config)
-        if err:
-            return err
         params: dict = {"limit": min(max(limit, 1), 100), "timeout": 0}
         if offset is not None:
             params["offset"] = offset
-        try:
-            result = await telegram_api_call(token, "getUpdates", params)
-        except httpx.HTTPStatusError as e:
-            return {"error": f"Telegram API error: {e.response.status_code}"}
-        except httpx.RequestError as e:
-            return {"error": f"Request failed: {str(e)}"}
+        result = await _call(config, "getUpdates", params)
+        if "error" in result:
+            return result
         account = account_override.get()
         allowed_uids = config.get_allowed_user_ids(account) if account else None
         if allowed_uids is not None and result.get("ok") and result.get("result"):
@@ -260,26 +229,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 from_chat_id: Chat ID where the original message was sent.
                 message_id: Message ID of the message to forward.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("standard", level):
-                return {"error": "This tool requires 'standard' level or higher."}
-            err = _check_chat_allowed(config, chat_id, from_chat_id)
-            if err:
-                return err
             params = {
                 "chat_id": chat_id,
                 "from_chat_id": from_chat_id,
                 "message_id": message_id,
             }
-            try:
-                return await telegram_api_call(token, "forwardMessage", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "forwardMessage", params,
+                               min_level="standard", check_chats=(chat_id, from_chat_id))
 
         @mcp.tool()
         async def telegram_edit_message_text(
@@ -296,24 +252,11 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 text: New text for the message.
                 parse_mode: Optional formatting: "HTML", "Markdown", or "MarkdownV2".
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("standard", level):
-                return {"error": "This tool requires 'standard' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {"chat_id": chat_id, "message_id": message_id, "text": text}
             if parse_mode:
                 params["parse_mode"] = parse_mode
-            try:
-                return await telegram_api_call(token, "editMessageText", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "editMessageText", params,
+                               min_level="standard", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_delete_message(
@@ -326,22 +269,9 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 chat_id: Chat ID where the message was sent.
                 message_id: ID of the message to delete.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("standard", level):
-                return {"error": "This tool requires 'standard' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {"chat_id": chat_id, "message_id": message_id}
-            try:
-                return await telegram_api_call(token, "deleteMessage", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "deleteMessage", params,
+                               min_level="standard", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_photo(
@@ -358,26 +288,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 caption: Optional caption for the photo (max 1024 characters).
                 parse_mode: Optional formatting for caption: "HTML", "Markdown", or "MarkdownV2".
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("standard", level):
-                return {"error": "This tool requires 'standard' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {"chat_id": chat_id, "photo": photo}
             if caption:
                 params["caption"] = caption
             if parse_mode:
                 params["parse_mode"] = parse_mode
-            try:
-                return await telegram_api_call(token, "sendPhoto", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendPhoto", params,
+                               min_level="standard", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_document(
@@ -394,26 +311,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 caption: Optional caption for the document (max 1024 characters).
                 parse_mode: Optional formatting for caption: "HTML", "Markdown", or "MarkdownV2".
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("standard", level):
-                return {"error": "This tool requires 'standard' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {"chat_id": chat_id, "document": document}
             if caption:
                 params["caption"] = caption
             if parse_mode:
                 params["parse_mode"] = parse_mode
-            try:
-                return await telegram_api_call(token, "sendDocument", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendDocument", params,
+                               min_level="standard", check_chats=(chat_id,))
 
     # --- advanced level tools ---
 
@@ -426,23 +330,8 @@ def register_telegram_tools(mcp, config: TelegramConfig):
             Args:
                 chat_id: Chat ID or @channel_username.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("advanced", level):
-                return {"error": "This tool requires 'advanced' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
-            try:
-                return await telegram_api_call(
-                    token, "getChat", {"chat_id": chat_id}
-                )
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "getChat", {"chat_id": chat_id},
+                               min_level="advanced", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_location(
@@ -457,26 +346,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 latitude: Latitude of the location (-90 to 90).
                 longitude: Longitude of the location (-180 to 180).
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("advanced", level):
-                return {"error": "This tool requires 'advanced' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {
                 "chat_id": chat_id,
                 "latitude": latitude,
                 "longitude": longitude,
             }
-            try:
-                return await telegram_api_call(token, "sendLocation", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendLocation", params,
+                               min_level="advanced", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_poll(
@@ -493,28 +369,14 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 options: List of answer options (2-10 strings, each 1-100 characters).
                 is_anonymous: Whether the poll is anonymous (default True).
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("advanced", level):
-                return {"error": "This tool requires 'advanced' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
-            poll_options = [{"text": opt} for opt in options]
             params = {
                 "chat_id": chat_id,
                 "question": question,
-                "options": poll_options,
+                "options": [{"text": opt} for opt in options],
                 "is_anonymous": is_anonymous,
             }
-            try:
-                return await telegram_api_call(token, "sendPoll", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendPoll", params,
+                               min_level="advanced", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_pin_chat_message(
@@ -529,26 +391,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 message_id: ID of the message to pin.
                 disable_notification: If True, no notification is sent to chat members.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("advanced", level):
-                return {"error": "This tool requires 'advanced' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "disable_notification": disable_notification,
             }
-            try:
-                return await telegram_api_call(token, "pinChatMessage", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "pinChatMessage", params,
+                               min_level="advanced", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_unpin_chat_message(
@@ -561,24 +410,11 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 chat_id: Chat ID where the message is pinned.
                 message_id: ID of the message to unpin. If not specified, unpins the most recent pinned message.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("advanced", level):
-                return {"error": "This tool requires 'advanced' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params: dict = {"chat_id": chat_id}
             if message_id is not None:
                 params["message_id"] = message_id
-            try:
-                return await telegram_api_call(token, "unpinChatMessage", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "unpinChatMessage", params,
+                               min_level="advanced", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_get_chat_member_count(chat_id: str) -> dict:
@@ -587,23 +423,8 @@ def register_telegram_tools(mcp, config: TelegramConfig):
             Args:
                 chat_id: Chat ID or @channel_username.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("advanced", level):
-                return {"error": "This tool requires 'advanced' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
-            try:
-                return await telegram_api_call(
-                    token, "getChatMemberCount", {"chat_id": chat_id}
-                )
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "getChatMemberCount", {"chat_id": chat_id},
+                               min_level="advanced", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_get_chat_member(
@@ -615,25 +436,9 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 chat_id: Chat ID or @channel_username.
                 user_id: Unique identifier of the target user.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("advanced", level):
-                return {"error": "This tool requires 'advanced' level or higher."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
-            try:
-                return await telegram_api_call(
-                    token,
-                    "getChatMember",
-                    {"chat_id": chat_id, "user_id": user_id},
-                )
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "getChatMember",
+                               {"chat_id": chat_id, "user_id": user_id},
+                               min_level="advanced", check_chats=(chat_id,))
 
     # --- full level tools ---
 
@@ -654,26 +459,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 caption: Optional caption (max 1024 characters).
                 parse_mode: Optional formatting for caption.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {"chat_id": chat_id, "audio": audio}
             if caption:
                 params["caption"] = caption
             if parse_mode:
                 params["parse_mode"] = parse_mode
-            try:
-                return await telegram_api_call(token, "sendAudio", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendAudio", params,
+                               min_level="full", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_video(
@@ -690,26 +482,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 caption: Optional caption (max 1024 characters).
                 parse_mode: Optional formatting for caption.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {"chat_id": chat_id, "video": video}
             if caption:
                 params["caption"] = caption
             if parse_mode:
                 params["parse_mode"] = parse_mode
-            try:
-                return await telegram_api_call(token, "sendVideo", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendVideo", params,
+                               min_level="full", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_voice(
@@ -726,26 +505,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 caption: Optional caption (max 1024 characters).
                 parse_mode: Optional formatting for caption.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {"chat_id": chat_id, "voice": voice}
             if caption:
                 params["caption"] = caption
             if parse_mode:
                 params["parse_mode"] = parse_mode
-            try:
-                return await telegram_api_call(token, "sendVoice", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendVoice", params,
+                               min_level="full", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_sticker(
@@ -758,22 +524,9 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 chat_id: Target chat ID.
                 sticker: Sticker URL, file_id, or sticker set name.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
-            params = {"chat_id": chat_id, "sticker": sticker}
-            try:
-                return await telegram_api_call(token, "sendSticker", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendSticker",
+                               {"chat_id": chat_id, "sticker": sticker},
+                               min_level="full", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_copy_message(
@@ -788,26 +541,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 from_chat_id: Chat ID where the original message was sent.
                 message_id: Message ID of the message to copy.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id, from_chat_id)
-            if err:
-                return err
             params = {
                 "chat_id": chat_id,
                 "from_chat_id": from_chat_id,
                 "message_id": message_id,
             }
-            try:
-                return await telegram_api_call(token, "copyMessage", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "copyMessage", params,
+                               min_level="full", check_chats=(chat_id, from_chat_id))
 
         @mcp.tool()
         async def telegram_set_message_reaction(
@@ -822,26 +562,13 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 message_id: ID of the message to react to.
                 reaction: Emoji reaction (e.g. "👍", "❤", "🔥"). Omit to remove reaction.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params: dict = {"chat_id": chat_id, "message_id": message_id}
             if reaction:
                 params["reaction"] = [{"type": "emoji", "emoji": reaction}]
             else:
                 params["reaction"] = []
-            try:
-                return await telegram_api_call(token, "setMessageReaction", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "setMessageReaction", params,
+                               min_level="full", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_leave_chat(chat_id: str) -> dict:
@@ -850,23 +577,8 @@ def register_telegram_tools(mcp, config: TelegramConfig):
             Args:
                 chat_id: Chat ID to leave.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
-            try:
-                return await telegram_api_call(
-                    token, "leaveChat", {"chat_id": chat_id}
-                )
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "leaveChat", {"chat_id": chat_id},
+                               min_level="full", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_contact(
@@ -883,15 +595,6 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 first_name: Contact's first name.
                 last_name: Optional contact's last name.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {
                 "chat_id": chat_id,
                 "phone_number": phone_number,
@@ -899,12 +602,8 @@ def register_telegram_tools(mcp, config: TelegramConfig):
             }
             if last_name:
                 params["last_name"] = last_name
-            try:
-                return await telegram_api_call(token, "sendContact", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendContact", params,
+                               min_level="full", check_chats=(chat_id,))
 
         @mcp.tool()
         async def telegram_send_venue(
@@ -923,15 +622,6 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 title: Name of the venue.
                 address: Address of the venue.
             """
-            token, err = _resolve_account(config)
-            if err:
-                return err
-            level = _resolve_level(config)
-            if not _level_at_least("full", level):
-                return {"error": "This tool requires 'full' level."}
-            err = _check_chat_allowed(config, chat_id)
-            if err:
-                return err
             params = {
                 "chat_id": chat_id,
                 "latitude": latitude,
@@ -939,9 +629,5 @@ def register_telegram_tools(mcp, config: TelegramConfig):
                 "title": title,
                 "address": address,
             }
-            try:
-                return await telegram_api_call(token, "sendVenue", params)
-            except httpx.HTTPStatusError as e:
-                return {"error": f"Telegram API error: {e.response.status_code}"}
-            except httpx.RequestError as e:
-                return {"error": f"Request failed: {str(e)}"}
+            return await _call(config, "sendVenue", params,
+                               min_level="full", check_chats=(chat_id,))

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 from dotenv import load_dotenv
@@ -62,8 +63,6 @@ async def _list_tools():
             # Parse SSE response
             for line in tools_resp.text.splitlines():
                 if line.startswith("data: "):
-                    import json
-
                     data = json.loads(line[6:])
                     tools = data.get("result", {}).get("tools", [])
                     for tool in tools:
