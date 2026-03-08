@@ -1,5 +1,7 @@
 # Straight Connect
 
+![](banner.png)
+
 MCP server for communication service connectors. Currently supports Telegram with multi-account configuration. Designed for extensibility — more services (Slack, Discord, email, etc.) can be added later.
 
 ## Architecture
