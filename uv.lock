@@ -2004,6 +2004,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "gradio" },
+    { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
@@ -2014,6 +2015,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "gradio", specifier = ">=5.0.0" },
+    { name = "httpx", specifier = ">=0.26.0" },
     { name = "langchain", specifier = ">=0.3.0" },
     { name = "langchain-mcp-adapters", specifier = ">=0.2.0" },
     { name = "langchain-openai", specifier = ">=0.3.0" },

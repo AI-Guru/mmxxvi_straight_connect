@@ -1,9 +1,17 @@
+import logging
 import re
 
 import uvicorn
 from fastmcp import FastMCP
 
 from telegram import TelegramConfig, account_override, register_telegram_tools
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("connect")
 
 mcp = FastMCP(
     "Straight Connect MCP Server",
@@ -12,8 +20,8 @@ mcp = FastMCP(
 Currently supported services:
 - Telegram: Send and receive messages through configured Telegram bot accounts.
 
-Use telegram_list_accounts to discover which bot accounts are configured,
-then use the account label with other telegram_* tools.""",
+Each MCP endpoint is scoped to a single account via the URL path.
+Available tools depend on the configured level (basic/standard/advanced/full).""",
 )
 
 # --- Dynamic service registration ---
@@ -21,6 +29,20 @@ then use the account label with other telegram_* tools.""",
 telegram_config = TelegramConfig()
 if telegram_config.is_configured:
     register_telegram_tools(mcp, telegram_config)
+    for acct in telegram_config.list_accounts():
+        level = telegram_config.get_level(acct)
+        chats = telegram_config.get_allowed_chats(acct)
+        uids = telegram_config.get_allowed_user_ids(acct)
+        parts = [f"level={level}"]
+        if chats is not None:
+            parts.append(f"allowed_chats={chats}")
+        if uids is not None:
+            parts.append(f"allowed_user_ids={uids}")
+        else:
+            logger.warning("Account '%s': no ALLOWED_USER_IDS set — all users allowed", acct)
+        logger.info("Telegram account '%s': %s", acct, ", ".join(parts))
+else:
+    logger.info("No Telegram accounts configured")
 
 # --- Account-from-path middleware ---
 
