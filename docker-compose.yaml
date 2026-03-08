@@ -1,0 +1,19 @@
+name: mmxxvi-connect
+
+services:
+  mcp:
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile
+    container_name: connect-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${MCP_PORT:-9831}:8000"
+    networks:
+      - connect-network
+
+networks:
+  connect-network:
+    driver: bridge

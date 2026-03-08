@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "nietzsche-telegram": {
+      "url": "http://localhost:9831/mcp/telegram/nietzsche"
+    },
+    "aurelia-telegram": {
+      "url": "http://localhost:9831/mcp/telegram/aurelia"
+    }
+  }
+}
