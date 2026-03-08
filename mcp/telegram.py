@@ -6,7 +6,7 @@ import httpx
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
-# Set by middleware when account is determined from URL path
+# Set by middleware from the URL path /mcp/telegram/<account>
 account_override: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "account_override", default=None
 )
@@ -54,49 +54,24 @@ async def telegram_api_call(
         return response.json()
 
 
-def _resolve_account(config: TelegramConfig, account: Optional[str]) -> tuple[str | None, dict | None]:
-    """Resolve account label to token. Returns (token, error_dict)."""
-    # URL path override takes priority
-    override = account_override.get()
-    if override is not None:
-        account = override
+def _resolve_account(config: TelegramConfig) -> tuple[str | None, dict | None]:
+    """Resolve account from URL path to token. Returns (token, error_dict)."""
+    account = account_override.get()
     if account is None:
-        # Single-account mode: auto-select the only account
-        accounts = config.list_accounts()
-        if len(accounts) == 1:
-            account = accounts[0]
-        else:
-            return None, {"error": "Multiple accounts configured. Specify the account parameter."}
+        return None, {"error": "No account specified in URL path."}
     token = config.get_token(account)
     if not token:
-        return None, {"error": f"Unknown account: {account}. Use telegram_list_accounts to see available accounts."}
+        return None, {"error": f"Unknown account: {account}."}
     return token, None
 
 
 def register_telegram_tools(mcp, config: TelegramConfig):
     """Register all Telegram MCP tools."""
 
-    single_account = len(config.accounts) == 1
-
     @mcp.tool()
-    async def telegram_list_accounts() -> dict:
-        """List all configured Telegram bot accounts.
-
-        Returns the account labels that can be used with other telegram_* tools.
-        """
-        accounts = config.list_accounts()
-        return {"accounts": accounts, "count": len(accounts)}
-
-    @mcp.tool()
-    async def telegram_get_me(account: Optional[str] = None) -> dict:
-        """Get information about a Telegram bot account.
-
-        Use this to verify that an account is correctly configured.
-
-        Args:
-            account: Account label (e.g. "nietzsche"). Optional when only one account is configured.
-        """
-        token, err = _resolve_account(config, account)
+    async def telegram_get_me() -> dict:
+        """Get information about this Telegram bot account."""
+        token, err = _resolve_account(config)
         if err:
             return err
         try:
@@ -110,18 +85,16 @@ def register_telegram_tools(mcp, config: TelegramConfig):
     async def telegram_send_message(
         chat_id: str,
         text: str,
-        account: Optional[str] = None,
         parse_mode: Optional[str] = None,
     ) -> dict:
-        """Send a text message via a Telegram bot.
+        """Send a text message via this Telegram bot.
 
         Args:
             chat_id: Target chat ID (user ID, group ID, or @channel_username).
             text: Message text to send (max 4096 characters).
-            account: Account label (e.g. "nietzsche"). Optional when only one account is configured.
             parse_mode: Optional formatting: "HTML", "Markdown", or "MarkdownV2".
         """
-        token, err = _resolve_account(config, account)
+        token, err = _resolve_account(config)
         if err:
             return err
         params = {"chat_id": chat_id, "text": text}
@@ -136,18 +109,16 @@ def register_telegram_tools(mcp, config: TelegramConfig):
 
     @mcp.tool()
     async def telegram_get_updates(
-        account: Optional[str] = None,
         limit: int = 10,
         offset: Optional[int] = None,
     ) -> dict:
-        """Get recent incoming updates (messages, etc.) for a Telegram bot.
+        """Get recent incoming updates (messages, etc.) for this Telegram bot.
 
         Args:
-            account: Account label (e.g. "nietzsche"). Optional when only one account is configured.
             limit: Maximum number of updates to retrieve (1-100, default 10).
             offset: Update ID offset. Pass the highest update_id + 1 from previous results to acknowledge older updates.
         """
-        token, err = _resolve_account(config, account)
+        token, err = _resolve_account(config)
         if err:
             return err
         params: dict = {"limit": min(max(limit, 1), 100), "timeout": 0}

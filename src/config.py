@@ -21,7 +21,7 @@ def build_mcp_json() -> dict:
                 continue
             token_key = f"TELEGRAM_{label.upper()}_BOT_TOKEN"
             if os.environ.get(token_key):
-                servers[f"{label}-telegram"] = {
+                servers[label.lower()] = {
                     "url": f"{base}/telegram/{label.lower()}"
                 }
 
