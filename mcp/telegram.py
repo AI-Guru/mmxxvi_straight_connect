@@ -185,17 +185,15 @@ def register_telegram_tools(mcp, config: TelegramConfig):
     @mcp.tool()
     async def telegram_get_updates(
         limit: int = 10,
-        offset: Optional[int] = None,
+        auto_acknowledge: bool = True,
     ) -> dict:
         """Get recent incoming updates (messages, etc.) for this Telegram bot.
 
         Args:
             limit: Maximum number of updates to retrieve (1-100, default 10).
-            offset: Update ID offset. Pass the highest update_id + 1 from previous results to acknowledge older updates.
+            auto_acknowledge: If True (default), automatically acknowledge updates so they won't be returned again on subsequent calls.
         """
         params: dict = {"limit": min(max(limit, 1), 100), "timeout": 0}
-        if offset is not None:
-            params["offset"] = offset
         result = await _call(config, "getUpdates", params)
         if "error" in result:
             return result
@@ -210,6 +208,10 @@ def register_telegram_tools(mcp, config: TelegramConfig):
             filtered = before - len(result["result"])
             if filtered:
                 logger.info("Filtered %d update(s) from non-allowed users for '%s'", filtered, account)
+        # Auto-acknowledge updates so they won't be returned again
+        if auto_acknowledge and result.get("ok") and result.get("result"):
+            max_update_id = max(u["update_id"] for u in result["result"])
+            await _call(config, "getUpdates", {"offset": max_update_id + 1, "limit": 1, "timeout": 0})
         return result
 
     # --- standard level tools ---
