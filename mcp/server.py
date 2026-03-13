@@ -2,9 +2,11 @@ import logging
 import re
 
 import uvicorn
+from fastapi import FastAPI
 from fastmcp import FastMCP
 
 from telegram import TelegramConfig, account_override, register_telegram_tools
+from telegram_api import create_telegram_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,9 +69,34 @@ class AccountPathMiddleware:
         await self.app(scope, receive, send)
 
 
+# --- Build combined app ---
+
+def create_app() -> FastAPI:
+    """Create the combined FastAPI app with MCP and REST API."""
+    # Create main FastAPI app
+    app = FastAPI(
+        title="Straight Connect",
+        description="MCP Server and REST API for messaging services",
+        version="1.0.0",
+    )
+
+    # Mount REST API routes
+    if telegram_config.is_configured:
+        telegram_router = create_telegram_router(telegram_config)
+        app.include_router(telegram_router)
+        logger.info("REST API mounted at /api/telegram")
+
+    # Mount MCP app
+    mcp_app = mcp.http_app(path="/_mcp", transport="streamable-http")
+    app.mount("/_mcp", mcp_app)
+    logger.info("MCP server mounted at /_mcp")
+
+    return app
+
+
 # --- Start server ---
 
 if __name__ == "__main__":
-    app = mcp.http_app(path="/_mcp", transport="streamable-http")
+    app = create_app()
     app = AccountPathMiddleware(app)
     uvicorn.run(app, host="0.0.0.0", port=8000)

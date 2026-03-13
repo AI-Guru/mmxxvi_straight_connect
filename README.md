@@ -8,9 +8,11 @@ MCP server for communication service connectors. Currently supports Telegram wit
 
 ```
 mcp/
-├── server.py          # FastMCP entry point + ASGI middleware
-├── telegram.py        # Telegram config, API client, tool definitions
-├── requirements.txt   # Server dependencies
+├── server.py            # FastAPI + FastMCP entry point
+├── telegram_service.py  # Shared Telegram service layer
+├── telegram_api.py      # REST API routes
+├── telegram.py          # MCP tool definitions + config
+├── requirements.txt     # Server dependencies
 └── Dockerfile
 
 src/
@@ -22,6 +24,12 @@ pyproject.toml
 .env                   # Your configuration (not committed)
 .env.example           # Configuration template
 ```
+
+The server exposes two interfaces:
+- **MCP** for AI agent tool use
+- **REST API** for direct HTTP access
+
+Both interfaces use the same underlying `TelegramService` layer, ensuring consistent behavior.
 
 ## Setup
 
@@ -131,6 +139,61 @@ Examples:
 
 There is no shared `/mcp` endpoint — each URL is exclusive to one account. This enables MCP clients to connect per-account with distinct tool namespaces.
 
+## REST API
+
+A REST API is available alongside MCP for direct HTTP access. Both interfaces use the same underlying service layer.
+
+**Base URL**: `http://localhost:9831/api/telegram/{account}/...`
+
+**Swagger docs**: `http://localhost:9831/docs`
+
+### Endpoints
+
+| Method | Endpoint | Description | Level |
+|--------|----------|-------------|-------|
+| GET | `/{account}/me` | Get bot info | basic |
+| POST | `/{account}/chats/{chat_id}/messages` | Send a message | basic |
+| GET | `/{account}/updates` | Get updates (with auto-acknowledge) | basic |
+| POST | `/{account}/chats/{chat_id}/forward` | Forward a message | standard |
+| PUT | `/{account}/chats/{chat_id}/messages` | Edit a message | standard |
+| DELETE | `/{account}/chats/{chat_id}/messages/{message_id}` | Delete a message | standard |
+| POST | `/{account}/chats/{chat_id}/photos` | Send a photo | standard |
+| POST | `/{account}/chats/{chat_id}/documents` | Send a document | standard |
+| GET | `/{account}/chats/{chat_id}` | Get chat info | advanced |
+| POST | `/{account}/chats/{chat_id}/location` | Send a location | advanced |
+| POST | `/{account}/chats/{chat_id}/polls` | Send a poll | advanced |
+| POST | `/{account}/chats/{chat_id}/pin` | Pin a message | advanced |
+| POST | `/{account}/chats/{chat_id}/unpin` | Unpin a message | advanced |
+| GET | `/{account}/chats/{chat_id}/member-count` | Get member count | advanced |
+| GET | `/{account}/chats/{chat_id}/members/{user_id}` | Get member info | advanced |
+| POST | `/{account}/chats/{chat_id}/audio` | Send audio | full |
+| POST | `/{account}/chats/{chat_id}/video` | Send video | full |
+| POST | `/{account}/chats/{chat_id}/voice` | Send voice message | full |
+| POST | `/{account}/chats/{chat_id}/stickers` | Send sticker | full |
+| POST | `/{account}/chats/{chat_id}/copy` | Copy a message | full |
+| POST | `/{account}/chats/{chat_id}/reactions` | Set reaction | full |
+| POST | `/{account}/chats/{chat_id}/leave` | Leave chat | full |
+| POST | `/{account}/chats/{chat_id}/contacts` | Send contact | full |
+| POST | `/{account}/chats/{chat_id}/venues` | Send venue | full |
+
+### Examples
+
+```bash
+# Get bot info
+curl http://localhost:9831/api/telegram/aurelia/me
+
+# Send a message
+curl -X POST http://localhost:9831/api/telegram/aurelia/chats/123456789/messages \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello!"}'
+
+# Get updates (auto-acknowledged)
+curl "http://localhost:9831/api/telegram/aurelia/updates?limit=10"
+
+# Get updates without acknowledging
+curl "http://localhost:9831/api/telegram/aurelia/updates?auto_acknowledge=false"
+```
+
 ## Client Tools
 
 ### Generate mcp.json
@@ -174,9 +237,11 @@ Tool names are prefixed with the account label for disambiguation (e.g., `nietzs
 
 ## How It Works
 
+- **Shared service layer**: Both MCP tools and REST API use `TelegramService` for all Telegram operations, ensuring consistent behavior
 - **URL routing**: ASGI middleware rewrites `/mcp/<service>/<account>` to the internal FastMCP endpoint and sets the account context via `contextvars`
 - **Dynamic registration**: Only configured services register their tools. If `TELEGRAM_ACCOUNTS` is empty, no Telegram tools exist
 - **Level gating**: Tools are registered based on the maximum level across all accounts. Per-account level checks happen at call time, returning an error if the account's level is insufficient
 - **Chat whitelisting**: Optional per-account `ALLOWED_CHATS` restricts which chats the bot can interact with
 - **User filtering**: Optional per-account `ALLOWED_USER_IDS` filters incoming updates to only include messages from specified users
+- **Auto-acknowledge updates**: By default, `get_updates` automatically acknowledges retrieved updates so they won't be returned again on subsequent calls
 - **Extensibility**: New services follow the same pattern — add a config class, register tools conditionally, and the middleware routes automatically via `/mcp/<service>/<account>`
